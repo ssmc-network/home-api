@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
 
 RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get -y install --no-install-recommends \
+    apt-get update && apt-get -y install --no-install-recommends \
     ffmpeg
 
 # 依存解決 (本番用: 通常依存 only)
