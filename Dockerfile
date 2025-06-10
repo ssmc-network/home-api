@@ -46,4 +46,5 @@ COPY --from=prod-deps /usr/local/lib/python3.13/site-packages /usr/local/lib/pyt
 COPY --from=prod-deps /usr/local/bin /usr/local/bin
 
 COPY ./app /usr/src/app
-# CMD [""]
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
