@@ -9,6 +9,11 @@ RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get -y dist-upgrade
 
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get -y install --no-install-recommends \
+    ffmpeg
+
 # 依存解決 (本番用: 通常依存 only)
 FROM base AS prod-deps
 COPY --from=goegoe0212/poetry-image:latest /root/.local /root/.local
