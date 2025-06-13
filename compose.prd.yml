@@ -1,5 +1,5 @@
 services:
-  fastapi:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,3 +10,12 @@ services:
       driver: "json-file"
       options:
         max-size: "10m"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis-service
+
+  redis-service:
+    image: redis:alpine
+    environment:
+      - TZ=Asia/Tokyo

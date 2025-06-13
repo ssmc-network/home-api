@@ -1,5 +1,5 @@
 services:
-  fastapi:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,3 +9,10 @@ services:
     tty: true
     stdin_open: true
     command: /bin/bash
+    depends_on:
+      - redis-service
+
+  redis-service:
+    image: redis:alpine
+    environment:
+      - TZ=Asia/Tokyo
