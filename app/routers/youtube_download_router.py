@@ -6,6 +6,7 @@ from pathlib import Path
 import redis
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from yt_dlp import YoutubeDL  # type: ignore[import]
 
 from settings.config import settings
@@ -18,13 +19,19 @@ REDIS_QUEUE_KEY = "youtube_download_queue"
 REDIS_STATUS_KEY = "youtube_download_statuses"
 
 
+class YoutubeDownload(Basemodel)
+    """youtubeのURL"""
+
+    url: str = Field()
+
+
 @router.post("/download")
-def download(url: str, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
+def download(sp_args: YoutubeDownload, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
     try:
         redis_client = request.app.state.redis
         task_id = str(uuid.uuid4())
         redis_client.hset(REDIS_STATUS_KEY, task_id, json.dumps({"status": "queued", "error": None}))
-        redis_client.rpush(REDIS_QUEUE_KEY, json.dumps({"task_id": task_id, "url": url}))
+        redis_client.rpush(REDIS_QUEUE_KEY, json.dumps({"task_id": task_id, "url": sp_args.url}))
         background_tasks.add_task(process_queue, request)
         return JSONResponse({"task_id": task_id, "message": "キューに登録しました"})
     except redis.exceptions.ConnectionError as e:
