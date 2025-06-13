@@ -19,7 +19,7 @@ REDIS_QUEUE_KEY = "youtube_download_queue"
 REDIS_STATUS_KEY = "youtube_download_statuses"
 
 
-class YoutubeDownload(Basemodel)
+class YoutubeDownload(Basemodel):
     """youtubeのURL"""
 
     url: str = Field()
