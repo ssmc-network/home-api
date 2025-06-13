@@ -22,7 +22,7 @@ REDIS_STATUS_KEY = "youtube_download_statuses"
 class YoutubeDownload(BaseModel):
     """youtubeのURL"""
 
-    url: str = Field()
+    url: str
 
 
 @router.post("/download")
