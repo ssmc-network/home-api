@@ -110,7 +110,7 @@ def download_youtube(url: str, output_dir: str) -> None:
     path_out_dir = Path(output_dir)
     ydl_opts = {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": str(path_out_dir / "%(title)s.mp4"),
+        "outtmpl": str(path_out_dir / "%(title).50s.mp4"),
         "merge_output_format": "mp4",
         "postprocessors": [],
     }
