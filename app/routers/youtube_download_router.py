@@ -1,5 +1,4 @@
 import json
-import logging
 import uuid
 from pathlib import Path
 
@@ -9,11 +8,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL  # type: ignore[import]
 
+from modules.log_module import log_application
 from settings.config import settings
 
 router = APIRouter(tags=["Youtube Download"])
 
-logger = logging.getLogger(__name__)
+logger = log_application(__name__)
 
 REDIS_QUEUE_KEY = "youtube_download_queue"
 REDIS_STATUS_KEY = "youtube_download_statuses"
