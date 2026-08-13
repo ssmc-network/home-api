@@ -1,6 +1,6 @@
-ARG PYTHON_VERSION=3.13.4
+ARG PYTHON_VERSION=3.13.12
 
-FROM python:${PYTHON_VERSION}-slim-bookworm AS base
+FROM python:${PYTHON_VERSION}-slim-trixie AS base
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /usr/src/app
 ENV PATH=/root/.local/bin:$PATH

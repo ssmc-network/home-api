@@ -56,6 +56,23 @@ def download_status(request: Request) -> JSONResponse:
         return JSONResponse({"error": "不明なエラー", "detail": str(e)}, status_code=500)
 
 
+@router.delete("/download/all")
+def delete_all_downloads(request: Request) -> JSONResponse:
+    try:
+        redis_client = request.app.state.redis
+        # ステータスハッシュのフィールドを削除
+        statuses = redis_client.hgetall(REDIS_STATUS_KEY)
+        if statuses:
+            redis_client.hdel(REDIS_STATUS_KEY, *statuses.keys())
+        return JSONResponse({"message": "すべてのステータスを削除しました"})
+    except redis.exceptions.ConnectionError as e:
+        return JSONResponse({"error": "Redisに接続できません", "detail": str(e)}, status_code=503)
+    except redis.exceptions.RedisError as e:
+        return JSONResponse({"error": "Redisエラー", "detail": str(e)}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"error": "不明なエラー", "detail": str(e)}, status_code=500)
+
+
 def process_queue(request: Request) -> None:
     try:
         redis_client = request.app.state.redis
