@@ -3,32 +3,156 @@ name: Test on PR
 on:
   pull_request:
     branches:
-      - release/*
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  id-token: write
 
 jobs:
   build_docker_image_and_test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
+
+      - name: OIDC token
+        id: docker_oidc
+        uses: docker/oidc-action@v1
+        with:
+          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+
+      # ビルド前にログインするのは dhi.io だけ。docker.io へのログインは
+      # ビルド後(Docker Scoutの直前)に行う — 理由は後述のログインステップの
+      # コメントおよびCLAUDE.mdを参照。
+      - name: Login to Docker Hardened Images registry
+        uses: docker/login-action@v4
+        with:
+          registry: dhi.io
+          username: ssmcnetwork
+          password: ${{ steps.docker_oidc.outputs.token }}
 
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          target: develop
+          target: dev
           push: false
           tags: test-image:latest
           load: true
 
       - name: Run ruff check
         run: |
-          docker run --rm test-image:latest ruff check
+          docker run --rm test-image:latest ruff check .
 
       - name: Run ruff format
         run: |
-          docker run --rm test-image:latest ruff format
+          docker run --rm test-image:latest ruff format --check .
+
+      - name: Run tests
+        run: |
+          docker run --rm test-image:latest bash -c '[ -d tests ] && pytest || echo "no tests/ directory yet, skipping"'
+
+      - name: Build production image for vulnerability scan
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: prd
+          push: false
+          tags: prd-scan-image:latest
+          load: true
+
+      # `docker scout cves` はスキャン対象がローカルのみのイメージであっても
+      # Docker Hubへのログインを要求するため、pushしないこのワークフローでも
+      # OIDCでのログインが必要。ただしこのログインは必ず全ビルドの「後」に行う:
+      # ログイン済みだとbuildxはdocker.ioへのpull全てにこのトークンを使うが、
+      # OIDC connectionが権限を与えているのは ssmcnetwork 配下のみのため、
+      # Dockerfileが参照する mwader/static-ffmpeg のような名前空間外の公開
+      # イメージのpullが `401 insufficient scopes` で失敗する(CLAUDE.md参照)。
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ssmcnetwork
+          password: ${{ steps.docker_oidc.outputs.token }}
+
+      - name: Install Docker Scout CLI
+        run: curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --
+
+      - name: Scan production image with Docker Scout
+        run: |
+          docker scout cves prd-scan-image:latest --format markdown --output scout-report-full.md
+          docker scout cves prd-scan-image:latest --only-severity critical,high --format markdown --output scout-report-pr.md
+
+      - name: Upload full Docker Scout report
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-scout-report-pr-${{ github.event.pull_request.number || github.run_id }}
+          path: scout-report-full.md
+          retention-days: 90
+
+      - name: Update Docker Scout results PR comment
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            // Issue本文と同じ上限(65536文字)がPRコメントにもあるため、critical/high
+            // のみに絞り、念のため文字数でも防御的に切り詰める(詳細はCLAUDE.md参照)。
+            const MAX_BODY_LENGTH = 60000;
+            const marker = '<!-- docker-scout-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const header = [
+              marker,
+              '## 🐳 Docker Scout 脆弱性スキャン結果',
+              '',
+              `**スキャン日時:** ${new Date().toISOString()}`,
+              '**対象:** 本番(`prd`)イメージ',
+              `**Workflow run:** ${runUrl}`,
+              '**表示範囲:** critical/high のみ(medium/lowを含む全件はWorkflow runのArtifact `docker-scout-report-pr-${{ github.event.pull_request.number || github.run_id }}` を参照)',
+              '',
+            ].join('\n');
+            const footer = '\n\n<sub>このPRに新しいコミットがpushされるたび、このコメントが最新結果で上書きされます。</sub>';
+
+            let report = fs.readFileSync('scout-report-pr.md', 'utf8');
+            const budget = MAX_BODY_LENGTH - header.length - footer.length;
+            if (report.length > budget) {
+              report = report.slice(0, budget) + '\n\n...(文字数制限のため以降省略。全件はArtifactを参照)';
+            }
+            const body = header + report + footer;
+
+            // workflow_dispatchでの手動実行(PRが無い)ではジョブのサマリーにのみ出力する。
+            // PR起点のイベントでのみ、そのPR自体へのコメント投稿/上書きも行う。
+            await core.summary.addRaw(body).write();
+
+            if (context.eventName === 'pull_request') {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              const existing = comments.find((comment) => comment.body.startsWith(marker));
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body,
+                });
+              }
+            }

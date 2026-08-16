@@ -1,0 +1,124 @@
+name: Release (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (vX.Y.Z)"
+        required: true
+        type: string
+      target:
+        description: "Branch or commit to release from"
+        required: false
+        default: main
+        type: string
+      dry_run:
+        description: "Dry run: only show what would be created"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # target には main 以外の任意のブランチ/コミットを指定できるため、
+      # そのref解決のために全ブランチ・全タグの履歴を取得しておく必要がある
+      # (fetch-depth: 0 は全ブランチ・全タグを取得する)。
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must match vX.Y.Z format (got: '$VERSION')"
+            exit 1
+          fi
+
+      - name: Resolve target SHA
+        id: resolve_target
+        run: |
+          TARGET="${{ inputs.target }}"
+          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET"; then
+            TARGET_SHA="$(git rev-parse "refs/remotes/origin/$TARGET")"
+          elif git cat-file -e "${TARGET}^{commit}" 2>/dev/null; then
+            TARGET_SHA="$(git rev-parse "${TARGET}^{commit}")"
+          else
+            echo "::error::target '$TARGET' is not a valid branch or commit in this repository"
+            exit 1
+          fi
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Show release plan and check for existing tag
+        run: |
+          VERSION="${{ inputs.version }}"
+          TARGET="${{ inputs.target }}"
+          TARGET_SHA="${{ steps.resolve_target.outputs.target_sha }}"
+
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            TAG_EXISTS=true
+          else
+            TAG_EXISTS=false
+          fi
+
+          {
+            echo "## Release plan"
+            echo ""
+            echo "- version: \`$VERSION\`"
+            echo "- target: \`$TARGET\`"
+            echo "- target_sha: \`$TARGET_SHA\`"
+            echo "- tag already exists: \`$TAG_EXISTS\`"
+            echo "- dry_run: \`${{ inputs.dry_run }}\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ "$TAG_EXISTS" = "true" ]; then
+            echo "::error::tag $VERSION already exists"
+            exit 1
+          fi
+
+      - name: Dry run - stop here
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "dry_run=true のため、タグ・Releaseの作成はスキップしました。" >> "$GITHUB_STEP_SUMMARY"
+          echo "実際に作成するには、dry_run を false にして再実行してください。" >> "$GITHUB_STEP_SUMMARY"
+
+      # gh release create にタグ作成も任せることはできるが、その場合に
+      # 作成されるタグがannotatedになる保証がないため、annotated tagを
+      # 明示的に自前で作成・pushしてから、既存タグを対象にReleaseを作る。
+      - name: Create and push annotated tag
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ inputs.version }}" "${{ steps.resolve_target.outputs.target_sha }}" -m "Release ${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ inputs.version }}" \
+            --title "${{ inputs.version }}" \
+            --generate-notes
+
+      # GITHUB_TOKENで行ったgit push(上のannotated tag作成)は、GitHubの
+      # 無限連鎖防止の仕様により他ワークフローのpushトリガーを起動しない
+      # (build.yamlの `on: push: tags:` が反応しない)。workflow_dispatch/
+      # repository_dispatchはこの制限の例外として明示的に許可されているため、
+      # build.yamlをここから直接dispatchして代わりのトリガーとする。
+      - name: Trigger build.yaml for the new tag
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build.yaml \
+            --ref "${{ inputs.version }}" \
+            -f version="${{ inputs.version }}"

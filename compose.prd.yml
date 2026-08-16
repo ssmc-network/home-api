@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: production
+      target: prd
     environment:
       - TZ=Asia/Tokyo
     logging:
