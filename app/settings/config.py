@@ -3,7 +3,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    loglevel: str = Field("INFO")
+    service: str = Field(default="home-api")
+    tz: str = Field(default="Asia/Tokyo")
+    loglevel: str = Field(default="INFO")
     title: str = Field(default="FastAPI")
     description: str = Field(default="My App Description")
     version: str = Field(default="1.0.0")

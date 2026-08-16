@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL  # type: ignore[import]
 
-from modules.log_module import log_application
+from core.log_modules import log_application
 from settings.config import settings
 
 router = APIRouter(tags=["Youtube Download"])
@@ -138,4 +138,6 @@ def download_youtube(url: str, output_dir: str) -> None:
 def get_youtube_title(url: str) -> str:
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(url, download=False)
-        return info.get("title", "unknown")
+        # yt-dlpは型スタブを持たずextract_infoの戻り値がAnyになるため、
+        # str()で明示的に確定させる(mypyのwarn_return_any対策も兼ねる)。
+        return str(info.get("title", "unknown"))

@@ -16,8 +16,8 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - コンテナ内でコマンド実行: `docker compose exec app <command>`、例: `docker compose exec app ruff check .`
 - Lint: `ruff check .`(コンテナ内、`/usr/src/app` から実行)
 - フォーマット: `ruff format .`
-- 型チェック: `mypy .`(ただし後述の通り `[tool.mypy]` 設定が未整備で、CIでも実行していない)
-- テスト: `pytest`(**現時点でテストは1件も無く、pytest自体が依存に入っていない**。CI(`test.yaml`)の `[ -d tests ]` ガードにより、`tests/` が無い間はスキップされる)
+- 型チェック: `mypy .`(**兄弟リポジトリと同じくCIでは実行していない**ため、ローカルで随時実行すること)
+- テスト: `pytest`(**現時点でテストファイルは1件も無い**。pytest/pytest-cov と `[tool.pytest.ini_options]` は用意済みなので、`app/tests/` を作れば動く。CI(`test.yaml`)の `[ -d tests ]` ガードにより、`tests/` が無い間はスキップされる)
 - 依存関係インストール(コンテナ内): `poetry install`(開発用)または `poetry install --without dev`(本番用)
 - 本番ビルド: `docker build --target prd .` / `docker compose -f compose.prd.yml up`
 
@@ -77,19 +77,18 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - **`prd` は非rootユーザーで動作する**(DHIの最小イメージの仕様)。`settings.output_dir`(既定 `/data`)への書き込みが必要なので、**このイメージをKubernetes等へデプロイする際はボリュームが非rootのUIDから書き込める必要がある**(`fsGroup` の指定など)。移行前の `python:slim` ベースはrootで動いていたため、ここは運用上の非互換点。
 - **`prd` にはシェルが無い**ため、`CMD` はexec形式で指定する必要がある(`python -m uvicorn ...`)。`docker compose exec` などでシェルに入ることもできないので、調査は `dev` イメージで行うこと。
 - **Poetryのpackage-modeは無効化**(`app/pyproject.toml` の `package-mode = false`)— 配布可能なパッケージではなく、単なるアプリケーションとして扱っている。
-- **JSON形式のアプリケーションログ**(`app/modules/log_module.py` の `log_application(name)`): `timestamp`/`level`/`message`/`function` の4キーを1行のJSONで出力する。`routers/youtube_download_router.py` は素の `logging.basicConfig` ではなくこの `log_application(__name__)` を使うこと。
+- **Ruff/mypy/pytestの設定**: `app/pyproject.toml`。兄弟リポジトリと同一の内容に揃えている。Ruffは `select = ["ALL"]` + 広範な `ignore` リストではなく `select = ["B", "E", "F", "I", "N", "W", "C90", "PL", "RUF", "UP"]` という絞り込んだルールセット(line-length 119、`target-version = "py313"`)。mypyは `disallow_untyped_defs` / `warn_return_any` などを有効にした比較的厳格な設定。pytestは `testpaths = ["tests"]` / `pythonpath = ["."]`。**ruff/mypy自体のバージョンは揃えていない**(このリポジトリは ruff `^0.15.1` / mypy `^1.16.0`、兄弟は `^0.16.0` / `^2.0.0`)— 設定を新たに導入するタイミングでツールのメジャーバージョンまで同時に動かすと切り分けが難しくなるため、バージョンの追随はRenovateのPRに委ねている。
+- **JSON形式のアプリケーションログ**(`app/core/log_modules.py` の `log_application(name)`): `TimeStampFormatter` が `settings.tz`(既定 `Asia/Tokyo`、compose の `TZ` 環境変数と揃える)を使ってタイムスタンプをローカル時刻のISO8601で出力し、`LogApplicationJSONFormatter` が `timestamp`/`level`/`message`/`service`/`tag`/`details`(`function`/`argument`/`error_message`/`stacktrace`)のJSONを1行で出力する。`routers/youtube_download_router.py` は素の `logging.basicConfig` ではなくこの `log_application(__name__)` を使うこと。**`zoneinfo` がタイムゾーンデータを解決できるよう `tzdata` を明示的に依存関係へ追加している** — これによりイメージ側のOS tzdata(`/usr/share/zoneinfo`)の有無に左右されなくなり、最小構成の `dhi.io/python:3` でもJSTで出力される(`PYTHONTZPATH=""` でOS側を無効化した状態でも `+09:00` で出ることを確認済み)。**移行前は `logging.Formatter.formatTime`(= libcのローカル時刻)に依存していたため、DHI移行によってログのタイムスタンプが黙ってUTCへ変わる懸念があった**が、この移行で解消している。
 - 両方のcomposeファイルで `TZ=Asia/Tokyo` を指定している — スケジューリングや時刻を扱う機能を追加する際もこれを維持すること。
 
 ## 既知の技術的負債(未対応)
 
-基盤(ブランチ運用・CI/CD・Renovate)の移行を先に済ませたため、以下は**意図的に手つかずのまま残している**。着手する際はこの順序を目安にすること。
+基盤(ブランチ運用・CI/CD・Renovate・Dockerfile・ログモジュール・Ruff/mypy/pytest設定)の移行を先に済ませたため、以下は**意図的に手つかずのまま残している**。着手する際はこの順序を目安にすること。
 
-1. **テストが1件も無い** — pytest/pytest-cov自体が `app/pyproject.toml` の依存に入っていない。`test.yaml` の `[ -d tests ]` ガードにより現状はスキップされる。兄弟リポジトリと同様、`app/tests/` 配下にユニットテストを置き、`[tool.pytest.ini_options]` に `testpaths = ["tests"]` / `pythonpath = ["."]` を追加する。
-2. **mypyの設定とCIステップが無い** — mypyはdev依存に入っているが `[tool.mypy]` セクションが無く、CIでも実行していない。兄弟リポジトリは `disallow_untyped_defs`/`warn_return_any` などを有効にした比較的厳格な設定を持つ。
-3. **ruffの設定が兄弟と不一致** — このリポジトリは `select = ["ALL"]` + 巨大な `ignore` リスト、line-length 120、`target-version` 未指定。兄弟は `select = ["B", "E", "F", "I", "N", "W", "C90", "PL", "RUF", "UP"]`、line-length 119、`target-version = "py313"` という絞り込んだ構成。揃える場合はどちらに寄せるかの判断が要る。
-4. **ログモジュールが兄弟より古い** — ファイル位置(`modules/log_module.py` vs 兄弟の `core/log_modules.py`)、タイムゾーン非対応(`settings.tz` が無く `formatTime` がUTC基準)、`service`/`tag`/`details`(引数・例外メッセージ・スタックトレース)が出力されない、`logger.propagate = False` 未設定、といった差分がある。加えてこちらはFastAPI/uvicornで動くため、兄弟にはあえて入れていない**uvicorn側のログ設定**(`log_config.yaml`、アクセスログのJSON化、ヘルスチェックの除外フィルタ)が別途必要になる。`zoneinfo` を使うなら `tzdata` の依存追加も併せて行うこと。
-   - **DHI移行に伴い優先度が上がっている**: 現行の `LogJSONFormatter` は `logging.Formatter.formatTime`(= libcのローカル時刻)に依存しているため、composeの `TZ=Asia/Tokyo` が効くかどうかがイメージ内のtzdata(`/usr/share/zoneinfo`)の有無に左右される。`python:slim` には入っていたが、最小構成の `dhi.io/python:3` に入っている保証は無く、**ログのタイムスタンプが黙ってUTCに変わる可能性がある**。兄弟と同じく `zoneinfo` + `settings.tz` + Pythonの `tzdata` パッケージ依存へ移行すれば、イメージ側のtzdataに依存しなくなり解消する。
-5. **アプリ設計上の課題**:
+1. **テストファイルが1件も無い** — pytest/pytest-cov と `[tool.pytest.ini_options]` は導入済みなので、あとは `app/tests/` 配下にユニットテストを置くだけ。`test.yaml` の `[ -d tests ]` ガードにより、`tests/` が出来た時点で自動的にCIで走り始める。兄弟リポジトリの `app/tests/`(`test_main.py`/`test_redis_module.py`/`test_log_modules.py`)が参考になる。
+2. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
+3. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
+4. **アプリ設計上の課題**:
    - キューの消化が `BackgroundTasks` によるリクエスト駆動で、POSTが来ないと処理されない。逆に同時POSTの分だけ並列にダウンロードが走り、同時実行数の制御が無い。
    - バックグラウンド処理へ `Request` オブジェクトをそのまま渡し、レスポンス送出後に `request.app.state.redis` を参照している。
    - `video_title if "video_title" in locals() else "unknown"` という `locals()` を使った実装。
