@@ -17,7 +17,7 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - Lint: `ruff check .`(コンテナ内、`/usr/src/app` から実行)
 - フォーマット: `ruff format .`
 - 型チェック: `mypy .`(**兄弟リポジトリと同じくCIでは実行していない**ため、ローカルで随時実行すること)
-- テスト: `pytest`(**現時点でテストファイルは1件も無い**。pytest/pytest-cov と `[tool.pytest.ini_options]` は用意済みなので、`app/tests/` を作れば動く。CI(`test.yaml`)の `[ -d tests ]` ガードにより、`tests/` が無い間はスキップされる)
+- テスト: `pytest`(`app/tests/` 配下。CI(`test.yaml`)でも `dev` イメージの中で実行される)
 - 依存関係インストール(コンテナ内): `poetry install`(開発用)または `poetry install --without dev`(本番用)
 - 本番ビルド: `docker build --target prd .` / `docker compose -f compose.prd.yml up`
 
@@ -82,15 +82,17 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - **`prd` にはシェルが無い**ため、`CMD` はexec形式で指定する必要がある(`python -m uvicorn ...`)。`docker compose exec` などでシェルに入ることもできないので、調査は `dev` イメージで行うこと。
 - **Poetryのpackage-modeは無効化**(`app/pyproject.toml` の `package-mode = false`)— 配布可能なパッケージではなく、単なるアプリケーションとして扱っている。
 - **Ruff/mypy/pytestの設定**: `app/pyproject.toml`。兄弟リポジトリと同一の内容に揃えている。Ruffは `select = ["ALL"]` + 広範な `ignore` リストではなく `select = ["B", "E", "F", "I", "N", "W", "C90", "PL", "RUF", "UP"]` という絞り込んだルールセット(line-length 119、`target-version = "py313"`)。mypyは `disallow_untyped_defs` / `warn_return_any` などを有効にした比較的厳格な設定。pytestは `testpaths = ["tests"]` / `pythonpath = ["."]`。**ruff/mypy自体のバージョンは揃えていない**(このリポジトリは ruff `^0.15.1` / mypy `^1.16.0`、兄弟は `^0.16.0` / `^2.0.0`)— 設定を新たに導入するタイミングでツールのメジャーバージョンまで同時に動かすと切り分けが難しくなるため、バージョンの追随はRenovateのPRに委ねている。
+- **テストは fakeredis で実Redisを模す**(`app/tests/`): `conftest.py` の `fake_redis` フィクスチャがテストごとに独立したインメモリRedisを返す。`download_queue` は検証対象がハッシュ・リスト・`blpop` といったRedisのデータ構造そのものなので、mockで「hsetをこの引数で呼んだか」を見るのではなく、**実際にコマンドを実行して結果の状態でアサートする**。一方 `RedisConnector` は「プールを正しいパラメータで1度だけ作るか」が検証対象でRedisの振る舞いは関係ないため、兄弟リポジトリと同じく `unittest.mock` で `redis.ConnectionPool` をパッチしている。
+  - **testcontainersを採用していない理由**: CIは `docker run --rm test-image:latest ... pytest` の形で**テストをコンテナの中で実行している**ため、testcontainersを使うとテストコンテナ内から更にDockerを叩く必要があり、dockerソケットのマウントと `dev` イメージへのdockerクライアント追加が要る(DHI移行の方向性にも、「テストは本番と同じイメージの中で動かす」というCI設計にも反する)。加えて `compose.yml` には既に `redis-service` が居るため、ローカルで実Redisを使いたい場合はtestcontainers無しでそこへ繋げばよい。現在使っているコマンドは `hset`/`hgetall`/`rpush`/`blpop`/`delete` だけで、いずれもfakeredisが忠実に模せる範囲にある。Luaスクリプト・Cluster・実際の接続断など**fakeredisが模しきれない領域を検証したくなった時点で見直す**こと。
+  - ワーカーの検証は `test_download_queue.py` に集約し、エンドポイントの検証(`test_main.py`)では `settings.download_workers` を0にしてワーカーを起動しない。こうしないとPOSTしたタスクがアサート前に `processing` へ進んでしまい、テストが不安定になる。
 - **JSON形式のアプリケーションログ**(`app/core/log_modules.py` の `log_application(name)`): `TimeStampFormatter` が `settings.tz`(既定 `Asia/Tokyo`、compose の `TZ` 環境変数と揃える)を使ってタイムスタンプをローカル時刻のISO8601で出力し、`LogApplicationJSONFormatter` が `timestamp`/`level`/`message`/`service`/`tag`/`details`(`function`/`argument`/`error_message`/`stacktrace`)のJSONを1行で出力する。`routers/youtube_download_router.py` は素の `logging.basicConfig` ではなくこの `log_application(__name__)` を使うこと。**`zoneinfo` がタイムゾーンデータを解決できるよう `tzdata` を明示的に依存関係へ追加している** — これによりイメージ側のOS tzdata(`/usr/share/zoneinfo`)の有無に左右されなくなり、最小構成の `dhi.io/python:3` でもJSTで出力される(`PYTHONTZPATH=""` でOS側を無効化した状態でも `+09:00` で出ることを確認済み)。**移行前は `logging.Formatter.formatTime`(= libcのローカル時刻)に依存していたため、DHI移行によってログのタイムスタンプが黙ってUTCへ変わる懸念があった**が、この移行で解消している。
 - 両方のcomposeファイルで `TZ=Asia/Tokyo` を指定している — スケジューリングや時刻を扱う機能を追加する際もこれを維持すること。
 
 ## 既知の技術的負債(未対応)
 
-基盤(ブランチ運用・CI/CD・Renovate・Dockerfile・ログモジュール・Ruff/mypy/pytest設定)の移行を先に済ませたため、以下は**意図的に手つかずのまま残している**。着手する際はこの順序を目安にすること。
+基盤の移行(ブランチ運用・CI/CD・Renovate・Dockerfile・ログモジュール・Ruff/mypy/pytest設定)とアプリ設計の整理、ユニットテストの整備を済ませた時点で、以下が**意図的に手つかずのまま残っている**。
 
-1. **テストファイルが1件も無い** — pytest/pytest-cov と `[tool.pytest.ini_options]` は導入済みなので、あとは `app/tests/` 配下にユニットテストを置くだけ。`test.yaml` の `[ -d tests ]` ガードにより、`tests/` が出来た時点で自動的にCIで走り始める。兄弟リポジトリの `app/tests/`(`test_main.py`/`test_redis_module.py`/`test_log_modules.py`)が参考になる。
-2. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
-3. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
-4. **複数レプリカ運用時の同時ダウンロード数** — 同時実行数はワーカー本数で制御しているが、これは**1プロセス内での上限**でしかない。レプリカを増やすとその数だけ並列度も倍加する(`blpop` によりジョブ自体の重複処理は起きない)。全体で上限を設けたい場合はRedis側にセマフォを持たせるなどの仕組みが要る。
-5. **ダウンロード中にプロセスが落ちるとタスクが `processing` のまま残る** — `blpop` でキューから取り出した後にプロセスが停止すると、そのジョブはキューにもワーカーにも存在しないまま、ステータスだけ `processing` で残留する。厳密にやるなら処理中ジョブを別のリストへ退避する信頼性キュー(`lmove` を使うパターン)が必要。現状は `DELETE /download/all` で手動リセットする運用。
+1. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
+2. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
+3. **複数レプリカ運用時の同時ダウンロード数** — 同時実行数はワーカー本数で制御しているが、これは**1プロセス内での上限**でしかない。レプリカを増やすとその数だけ並列度も倍加する(`blpop` によりジョブ自体の重複処理は起きない)。全体で上限を設けたい場合はRedis側にセマフォを持たせるなどの仕組みが要る。
+4. **ダウンロード中にプロセスが落ちるとタスクが `processing` のまま残る** — `blpop` でキューから取り出した後にプロセスが停止すると、そのジョブはキューにもワーカーにも存在しないまま、ステータスだけ `processing` で残留する。厳密にやるなら処理中ジョブを別のリストへ退避する信頼性キュー(`lmove` を使うパターン)が必要。現状は `DELETE /download/all` で手動リセットする運用。
