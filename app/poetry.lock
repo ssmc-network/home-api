@@ -205,6 +205,31 @@ files = [
 toml = ["tomli ; python_full_version <= \"3.11.0a6\""]
 
 [[package]]
+name = "fakeredis"
+version = "2.37.0"
+description = "Python implementation of redis API, can be used for testing purposes."
+optional = false
+python-versions = ">=3.7"
+groups = ["dev"]
+files = [
+    {file = "fakeredis-2.37.0-py3-none-any.whl", hash = "sha256:657a2a695a1123be0c13f98db409371497bd94c29d260dd76a9fc7ce1a633745"},
+    {file = "fakeredis-2.37.0.tar.gz", hash = "sha256:7461f124dcba04a80691d72270b3d1d5cd100ef14dc068c76db825940f3ed799"},
+]
+
+[package.dependencies]
+redis = {version = ">=4.3", markers = "python_version > \"3.8\""}
+sortedcontainers = ">=2"
+
+[package.extras]
+bf = ["pyprobables (>=0.6)"]
+cf = ["pyprobables (>=0.6)"]
+json = ["jsonpath-ng (>=1.6)"]
+lua = ["lupa (>=2.1)"]
+probabilistic = ["pyprobables (>=0.6)"]
+valkey = ["valkey (>=6) ; python_version >= \"3.8\""]
+vectorset = ["jsonpath-ng (>=1.6) ; python_version >= \"3.11\"", "numpy (>=2.4.0) ; python_version >= \"3.11\""]
+
+[[package]]
 name = "fastapi"
 version = "0.129.0"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
@@ -891,7 +916,7 @@ version = "7.2.0"
 description = "Python client for Redis database and key-value store"
 optional = false
 python-versions = ">=3.10"
-groups = ["main"]
+groups = ["main", "dev"]
 files = [
     {file = "redis-7.2.0-py3-none-any.whl", hash = "sha256:01f591f8598e483f1842d429e8ae3a820804566f1c73dca1b80e23af9fba0497"},
     {file = "redis-7.2.0.tar.gz", hash = "sha256:4dd5bf4bd4ae80510267f14185a15cba2a38666b941aff68cccf0256b51c1f26"},
@@ -931,6 +956,18 @@ files = [
     {file = "ruff-0.15.1-py3-none-win_amd64.whl", hash = "sha256:c820fef9dd5d4172a6570e5721704a96c6679b80cf7be41659ed439653f62336"},
     {file = "ruff-0.15.1-py3-none-win_arm64.whl", hash = "sha256:5ff7d5f0f88567850f45081fac8f4ec212be8d0b963e385c3f7d0d2eb4899416"},
     {file = "ruff-0.15.1.tar.gz", hash = "sha256:c590fe13fb57c97141ae975c03a1aedb3d3156030cabd740d6ff0b0d601e203f"},
+]
+
+[[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+description = "Sorted Containers -- Sorted List, Sorted Dict, Sorted Set"
+optional = false
+python-versions = "*"
+groups = ["dev"]
+files = [
+    {file = "sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0"},
+    {file = "sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88"},
 ]
 
 [[package]]
@@ -1301,4 +1338,4 @@ test = ["pytest (>=8.1,<9.0)", "pytest-rerunfailures (>=14.0,<15.0)"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.13"
-content-hash = "5ee05561d937ac60495a0ae656236a99bcd75c26ab53e4f0916ddac194869dc6"
+content-hash = "40c5120934412935a0387f3d22ee25b919f41b2ee03b261fbf6b889d9b6a3ed2"

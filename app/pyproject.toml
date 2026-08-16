@@ -15,6 +15,10 @@ ruff = "^0.15.1"
 mypy = "^1.16.0"
 pytest = "^9.1.1"
 pytest-cov = "^7.1.0"
+# Redisのデータ構造(ハッシュ/リスト/blpop)そのものが検証対象になるモジュールが
+# あるため、mockではなく実際にコマンドを実行できるfakeredisを使っている。
+# testcontainersを採用しなかった理由はCLAUDE.md参照。
+fakeredis = "^2.33.0"
 
 [build-system]
 requires = ["poetry-core"]

@@ -17,7 +17,7 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - Lint: `ruff check .`(コンテナ内、`/usr/src/app` から実行)
 - フォーマット: `ruff format .`
 - 型チェック: `mypy .`(**兄弟リポジトリと同じくCIでは実行していない**ため、ローカルで随時実行すること)
-- テスト: `pytest`(**現時点でテストファイルは1件も無い**。pytest/pytest-cov と `[tool.pytest.ini_options]` は用意済みなので、`app/tests/` を作れば動く。CI(`test.yaml`)の `[ -d tests ]` ガードにより、`tests/` が無い間はスキップされる)
+- テスト: `pytest`(`app/tests/` 配下。CI(`test.yaml`)でも `dev` イメージの中で実行される)
 - 依存関係インストール(コンテナ内): `poetry install`(開発用)または `poetry install --without dev`(本番用)
 - 本番ビルド: `docker build --target prd .` / `docker compose -f compose.prd.yml up`
 
@@ -67,10 +67,14 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 
 ## アーキテクチャ
 
-- **FastAPIアプリ**: `main.py` が `lifespan` で `RedisConnector().get_connection()` を `app.state.redis` に格納し、2つのrouterを `settings.prefix_url` 付きで登録する。`redoc_url=None`(ReDocは無効、Swagger UIのみ)。
+- **FastAPIアプリ**: `main.py` の `lifespan` がRedis接続を `app.state.redis` へ格納し、ダウンロードワーカーを起動し、2つのrouterを `settings.prefix_url` 付きで登録する。`redoc_url=None`(ReDocは無効、Swagger UIのみ)。
   - `routers/operation_check.py` — 疎通確認用。`/`(docsへリダイレクト)、`/operation`、`/operation/ip`、`/operation/gzip-test`。
-  - `routers/youtube_download_router.py` — 本体。`POST /download`、`GET /download/status`、`DELETE /download/all` と、yt-dlpを叩く処理(`process_queue`/`download_youtube`/`get_youtube_title`)。
-- **キュー処理はリクエスト駆動**: `POST /download` が `BackgroundTasks` で `process_queue` を起動し、Redisのリスト(`youtube_download_queue`)が空になるまで `lpop` し続ける。**常駐ワーカーではないため、POSTが来ないと積まれたジョブは処理されない**(下記「既知の負債」参照)。
+  - `routers/youtube_download_router.py` — HTTP層のみ。`POST /download`、`GET /download/status`、`DELETE /download/all` の3エンドポイントで、Redis操作は `modules/download_queue.py` 越しに行う。
+  - `modules/download_queue.py` — キュー(リスト)とステータス(ハッシュ)の読み書き、および常駐ワーカー(`run_worker`)。
+  - `modules/youtube_module.py` — yt-dlpの呼び出し(`download_youtube`/`get_youtube_title`)。
+- **キューの消化は常駐ワーカーが行う**: `lifespan` が `settings.download_workers` 本(既定1)のワーカータスクを起動し、各ワーカーが `blpop` でキューを待ち受ける。`POST /download` はキューへ積むだけで、ダウンロード自体には関与しない。**ワーカーの本数がそのまま同時ダウンロード数の上限**になる。Redisの `blpop` もyt-dlpのダウンロードもブロッキングなので、どちらも `asyncio.to_thread` でスレッドへ逃がしイベントループを止めない。**移行前は `POST /download` が `BackgroundTasks` で `process_queue` を起動する方式だったため、POSTが来ないと積まれたジョブが処理されず、逆に同時POSTの分だけ無制限に並列ダウンロードが走っていた**。
+- **ワーカーの停止**: `lifespan` の終了時に停止フラグ(`asyncio.Event`)を立て、処理中のダウンロードが終わるのを `settings.worker_shutdown_timeout_seconds` まで待ってから、待ち切れなかったワーカーだけキャンセルする。ワーカーが `blpop` で待機している場合は最大 `settings.queue_pop_timeout_seconds` 秒で停止に反応する。最後に `RedisConnector.close()` でプールを切断する。
+- **ワーカーは1件の失敗では止まらない**: ジョブ処理中の例外はステータスを `error` にした上で握り潰し、Redisの接続エラーは `settings.queue_error_backoff_seconds` 待ってから再試行する。**常駐ワーカーがループを抜けると以降のジョブが一切消化されなくなる**ため、意図的に広く捕捉している(移行前の `process_queue` はRedisエラーで `break` していたが、リクエスト毎に起動し直されるため問題にならなかった)。
 - **マルチステージDockerfile**: `ffmpeg` / `base`(`dhi.io/python:3-debian-dev`) → `dependencies` → `dev-dependencies` → `dev` / `prd`。OpenShift向けのUBIベースイメージではなく、通常のKubernetes環境向けにDocker Hardened Images (DHI) を使用している。ビルド系のステージ(`base`/`dependencies`/`dev-dependencies`/`dev`)は開発ツール入りの `-debian-dev` バリアントを使うが、`prd` だけは `base` を継承せず最小構成の `dhi.io/python:3` から独立して作っている(実行時イメージに開発ツールを含めないため)。ステージ名は兄弟リポジトリに合わせて `dev`/`prd` に統一している(以前は `develop`/`production`)。
 - **ffmpegは静的ビルドのバイナリを `mwader/static-ffmpeg` からCOPYする**: yt-dlpが映像と音声を別々に取得してmp4へマージするためにffmpegが必須だが、本番用の `dhi.io/python:3` は最小構成でパッケージマネージャを持たないため `apt-get install ffmpeg` ができない。このイメージが提供する `/ffmpeg`・`/ffprobe` は外部依存を持たない静的PIEバイナリなので、共有ライブラリを持ち込むことなくバイナリ2個のCOPYだけで済む。`dev`/`prd` の両ステージへ入れている。**このイメージは `docker.io` 由来のため、ワークフローのログイン順序に制約が生まれている**(前述の「`docker.io` へのログインは必ずビルドより後」を参照)。
 - **Poetryの依存関係はプロジェクト内 `.venv` に分離**(`POETRY_VIRTUALENVS_CREATE=true` + `POETRY_VIRTUALENVS_IN_PROJECT=true`)。`dependencies` ステージで `poetry config virtualenvs.options.no-pip true` を設定し、`.venv` に `pip` 自体を含めない(本番イメージにpip由来の脆弱性が紛れ込むのを防ぐため)。`dev`/`prd` はいずれも `dependencies`/`dev-dependencies` ステージから `.venv` の中身だけを `COPY --from` で引き継ぎ、poetry自身やビルド専用の依存(setuptoolsなど)は最終イメージに含めない。`dev` は `dev-dependencies`(devグループ込み)から、`prd` は `dependencies`(本番依存のみ)から `.venv` をコピーする。**移行前は `poetry config virtualenvs.create false` でシステムのsite-packagesへ直接インストールし、poetry本体を `goegoe0212/poetry-image:latest` という個人アカウントの浮動タグから持ち込んでいた**が、DHI移行に伴いどちらも解消した。
@@ -78,20 +82,17 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 - **`prd` にはシェルが無い**ため、`CMD` はexec形式で指定する必要がある(`python -m uvicorn ...`)。`docker compose exec` などでシェルに入ることもできないので、調査は `dev` イメージで行うこと。
 - **Poetryのpackage-modeは無効化**(`app/pyproject.toml` の `package-mode = false`)— 配布可能なパッケージではなく、単なるアプリケーションとして扱っている。
 - **Ruff/mypy/pytestの設定**: `app/pyproject.toml`。兄弟リポジトリと同一の内容に揃えている。Ruffは `select = ["ALL"]` + 広範な `ignore` リストではなく `select = ["B", "E", "F", "I", "N", "W", "C90", "PL", "RUF", "UP"]` という絞り込んだルールセット(line-length 119、`target-version = "py313"`)。mypyは `disallow_untyped_defs` / `warn_return_any` などを有効にした比較的厳格な設定。pytestは `testpaths = ["tests"]` / `pythonpath = ["."]`。**ruff/mypy自体のバージョンは揃えていない**(このリポジトリは ruff `^0.15.1` / mypy `^1.16.0`、兄弟は `^0.16.0` / `^2.0.0`)— 設定を新たに導入するタイミングでツールのメジャーバージョンまで同時に動かすと切り分けが難しくなるため、バージョンの追随はRenovateのPRに委ねている。
+- **テストは fakeredis で実Redisを模す**(`app/tests/`): `conftest.py` の `fake_redis` フィクスチャがテストごとに独立したインメモリRedisを返す。`download_queue` は検証対象がハッシュ・リスト・`blpop` といったRedisのデータ構造そのものなので、mockで「hsetをこの引数で呼んだか」を見るのではなく、**実際にコマンドを実行して結果の状態でアサートする**。一方 `RedisConnector` は「プールを正しいパラメータで1度だけ作るか」が検証対象でRedisの振る舞いは関係ないため、兄弟リポジトリと同じく `unittest.mock` で `redis.ConnectionPool` をパッチしている。
+  - **testcontainersを採用していない理由**: CIは `docker run --rm test-image:latest ... pytest` の形で**テストをコンテナの中で実行している**ため、testcontainersを使うとテストコンテナ内から更にDockerを叩く必要があり、dockerソケットのマウントと `dev` イメージへのdockerクライアント追加が要る(DHI移行の方向性にも、「テストは本番と同じイメージの中で動かす」というCI設計にも反する)。加えて `compose.yml` には既に `redis-service` が居るため、ローカルで実Redisを使いたい場合はtestcontainers無しでそこへ繋げばよい。現在使っているコマンドは `hset`/`hgetall`/`rpush`/`blpop`/`delete` だけで、いずれもfakeredisが忠実に模せる範囲にある。Luaスクリプト・Cluster・実際の接続断など**fakeredisが模しきれない領域を検証したくなった時点で見直す**こと。
+  - ワーカーの検証は `test_download_queue.py` に集約し、エンドポイントの検証(`test_main.py`)では `settings.download_workers` を0にしてワーカーを起動しない。こうしないとPOSTしたタスクがアサート前に `processing` へ進んでしまい、テストが不安定になる。
 - **JSON形式のアプリケーションログ**(`app/core/log_modules.py` の `log_application(name)`): `TimeStampFormatter` が `settings.tz`(既定 `Asia/Tokyo`、compose の `TZ` 環境変数と揃える)を使ってタイムスタンプをローカル時刻のISO8601で出力し、`LogApplicationJSONFormatter` が `timestamp`/`level`/`message`/`service`/`tag`/`details`(`function`/`argument`/`error_message`/`stacktrace`)のJSONを1行で出力する。`routers/youtube_download_router.py` は素の `logging.basicConfig` ではなくこの `log_application(__name__)` を使うこと。**`zoneinfo` がタイムゾーンデータを解決できるよう `tzdata` を明示的に依存関係へ追加している** — これによりイメージ側のOS tzdata(`/usr/share/zoneinfo`)の有無に左右されなくなり、最小構成の `dhi.io/python:3` でもJSTで出力される(`PYTHONTZPATH=""` でOS側を無効化した状態でも `+09:00` で出ることを確認済み)。**移行前は `logging.Formatter.formatTime`(= libcのローカル時刻)に依存していたため、DHI移行によってログのタイムスタンプが黙ってUTCへ変わる懸念があった**が、この移行で解消している。
 - 両方のcomposeファイルで `TZ=Asia/Tokyo` を指定している — スケジューリングや時刻を扱う機能を追加する際もこれを維持すること。
 
 ## 既知の技術的負債(未対応)
 
-基盤(ブランチ運用・CI/CD・Renovate・Dockerfile・ログモジュール・Ruff/mypy/pytest設定)の移行を先に済ませたため、以下は**意図的に手つかずのまま残している**。着手する際はこの順序を目安にすること。
+基盤の移行(ブランチ運用・CI/CD・Renovate・Dockerfile・ログモジュール・Ruff/mypy/pytest設定)とアプリ設計の整理、ユニットテストの整備を済ませた時点で、以下が**意図的に手つかずのまま残っている**。
 
-1. **テストファイルが1件も無い** — pytest/pytest-cov と `[tool.pytest.ini_options]` は導入済みなので、あとは `app/tests/` 配下にユニットテストを置くだけ。`test.yaml` の `[ -d tests ]` ガードにより、`tests/` が出来た時点で自動的にCIで走り始める。兄弟リポジトリの `app/tests/`(`test_main.py`/`test_redis_module.py`/`test_log_modules.py`)が参考になる。
-2. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
-3. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
-4. **アプリ設計上の課題**:
-   - キューの消化が `BackgroundTasks` によるリクエスト駆動で、POSTが来ないと処理されない。逆に同時POSTの分だけ並列にダウンロードが走り、同時実行数の制御が無い。
-   - バックグラウンド処理へ `Request` オブジェクトをそのまま渡し、レスポンス送出後に `request.app.state.redis` を参照している。
-   - `video_title if "video_title" in locals() else "unknown"` という `locals()` を使った実装。
-   - `RedisConnector._initialize_pool` が `redis.ConnectionError` を捕まえて `HTTPException` を投げているが、**ConnectionPoolの生成はソケット接続を伴わない**(実際の接続は最初のコマンド発行時)ため、この例外処理は実質デッドコード。兄弟リポジトリでは既に同じ問題を認識して削除・コメント化済み。
-   - `lifespan` に終了処理(Redis接続のクローズ)が無い。
-   - `DELETE /download/all` はステータスハッシュしか消さないため、キュー(`youtube_download_queue`)に未処理ジョブが残っていると、その後のPOSTを契機に「ステータスの無いジョブ」が処理されうる。
+1. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
+2. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
+3. **複数レプリカ運用時の同時ダウンロード数** — 同時実行数はワーカー本数で制御しているが、これは**1プロセス内での上限**でしかない。レプリカを増やすとその数だけ並列度も倍加する(`blpop` によりジョブ自体の重複処理は起きない)。全体で上限を設けたい場合はRedis側にセマフォを持たせるなどの仕組みが要る。
+4. **ダウンロード中にプロセスが落ちるとタスクが `processing` のまま残る** — `blpop` でキューから取り出した後にプロセスが停止すると、そのジョブはキューにもワーカーにも存在しないまま、ステータスだけ `processing` で残留する。厳密にやるなら処理中ジョブを別のリストへ退避する信頼性キュー(`lmove` を使うパターン)が必要。現状は `DELETE /download/all` で手動リセットする運用。
