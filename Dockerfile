@@ -5,7 +5,7 @@
 # `docker login dhi.io`(Docker Hubの認証情報)が必要。
 # タグは浮動(latestの中身が無断で変わる)ため、digestで固定しRenovateに
 # 更新PRを出させている(更新検知の仕組みはCLAUDE.md参照)。
-ARG PYTHON_DEV_IMAGE=dhi.io/python:3-debian-dev@sha256:02173cae8b920c98ff9fab81eb1aefcadd229f158110553c6ed758dc935589dd
+ARG PYTHON_DEV_IMAGE=dhi.io/python:3-debian-dev@sha256:7e527362b86f335bf5db8db53ab6b7aa128a0db6c1d4da75c32436424e0255ee
 ARG PYTHON_PRD_IMAGE=dhi.io/python:3@sha256:0536ccad57c9be08128bd2a6f0982570086ec943a88033f4f53f7adffe407903
 # yt-dlpが映像と音声を別々に取得してmp4へマージするためにffmpegが必須だが、
 # 本番用の dhi.io/python:3 は最小構成でパッケージマネージャを持たないため
