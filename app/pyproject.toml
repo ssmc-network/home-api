@@ -8,50 +8,46 @@ uvicorn = {extras = ["standard"], version = "^0.41.0"}
 pydantic-settings = "^2.9.1"
 yt-dlp = "^2026.2.4"
 redis = "^7.1.0"
+tzdata = ">=2024.1"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.15.1"
 mypy = "^1.16.0"
+pytest = "^9.1.1"
+pytest-cov = "^7.1.0"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.ruff]
-line-length = 120
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
-[tool.ruff.format]
-docstring-code-format = true
+[tool.mypy]
+show_error_context = true
+show_column_numbers = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_redundant_casts = true
+disable_error_code = "misc"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 119
 
 [tool.ruff.lint]
-select = ["ALL"]
-ignore = [
-    "BLE001", # blind except
-    "COM812", # missing trailing comma
-    "COM819", # prohibited-trailing-comma
-    "D1",     # undocumented
-    "D203",   # one blank line before class
-    "D213",   # multi-line summary second line
-    "D206",   # indent-with-spaces
-    "D300",   # triple-single-quotes
-    "D400",   # missing trailing period
-    "D415",   # missing terminal punctuation
-    "E111",   # indentation-with-invalid-multiple
-    "E114",   # indentation-with-invalid-multiple-comment
-    "E117",   # over-indented
-    "FA",     # flake8 future annotations
-    "ISC001", # single-line-implicit-string-concatenation
-    "ISC002", # multi-line-implicit-string-concatenation
-    "PD011",  # pandas use of dot values
-    "Q000",   # bad-quotes-inline-string
-    "Q001",   # bad-quotes-multiline-string
-    "Q002",   # bad-quotes-docstring
-    "Q003",   # avoidable-escaped-quote
-    "TD001",  # invalid todo tag
-    "TD002",  # missing todo author
-    "TD003",  # missing todo link
-    "W191",   # tab-indentation
-]
+select = ["B", "E", "F", "I", "N", "W", "C90", "PL", "RUF", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "PLC0415"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
 
 [tool.ruff.lint.pylint]
-max-args = 6
+max-args = 20
