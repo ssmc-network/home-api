@@ -28,6 +28,13 @@ build-backend = "poetry.core.masonry.api"
 testpaths = ["tests"]
 pythonpath = ["."]
 
+# CIでは `pytest --cov --cov-report=term-missing` として実行し、その標準出力を
+# そのままPRコメントへ投稿している(詳細はCLAUDE.md)。計測対象をここに書いて
+# おくことで、CI側は `--cov` を値なしで渡すだけで済む。
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*"]
+
 [tool.mypy]
 show_error_context = true
 show_column_numbers = true

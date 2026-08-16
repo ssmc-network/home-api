@@ -56,9 +56,85 @@ jobs:
         run: |
           docker run --rm test-image:latest ruff format --check .
 
+      # `shell: bash` を明示すると -o pipefail が付くため、tee を挟んでも
+      # pytest の失敗が握り潰されない。またガードを if/else にしているのは、
+      # `[ -d tests ] && pytest || echo ...` の形だと pytest が失敗したときに
+      # `||` 側の echo が成功してステップ全体が exit 0 になってしまうため
+      # (テストが1件も無かった頃は無害だったが、テスト追加後は「落ちるべきCIが
+      # 緑になる」ことを意味する)。
       - name: Run tests
+        shell: bash
         run: |
-          docker run --rm test-image:latest bash -c '[ -d tests ] && pytest || echo "no tests/ directory yet, skipping"'
+          docker run --rm test-image:latest bash -c '
+            if [ -d tests ]; then
+              pytest --cov --cov-report=term-missing
+            else
+              echo "no tests/ directory yet, skipping"
+            fi
+          ' | tee coverage.txt
+
+      - name: Update coverage PR comment
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const MAX_BODY_LENGTH = 60000;
+            const marker = '<!-- pytest-coverage-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const raw = fs.readFileSync('coverage.txt', 'utf8');
+            // pytest の出力全体ではなく、カバレッジの表以降だけをコメントへ載せる。
+            const lines = raw.split('\n');
+            const start = lines.findIndex((line) => line.includes('coverage: platform'));
+            let report = start === -1 ? raw.trim() : lines.slice(start).join('\n').trim();
+
+            const total = report.match(/^TOTAL\s+.*?(\d+)%/m);
+            const headline = total ? `**総カバレッジ: ${total[1]}%**` : '**カバレッジを計測できませんでした**';
+
+            const header = [
+              marker,
+              '## 🧪 テストカバレッジ',
+              '',
+              headline,
+              '',
+              `**Workflow run:** ${runUrl}`,
+              '',
+            ].join('\n');
+            const footer = '\n\n<sub>このPRに新しいコミットがpushされるたび、このコメントが最新結果で上書きされます。閾値によるCIの失敗は設定していません。</sub>';
+
+            const budget = MAX_BODY_LENGTH - header.length - footer.length - 8;
+            if (report.length > budget) {
+              report = report.slice(0, budget) + '\n...(文字数制限のため以降省略)';
+            }
+            const body = `${header}\`\`\`\n${report}\n\`\`\`${footer}`;
+
+            // workflow_dispatch での手動実行(PRが無い)ではジョブのサマリーにのみ出力する。
+            await core.summary.addRaw(body).write();
+
+            if (context.eventName === 'pull_request') {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              const existing = comments.find((comment) => comment.body.startsWith(marker));
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body,
+                });
+              }
+            }
 
       - name: Build production image for vulnerability scan
         uses: docker/build-push-action@v7
