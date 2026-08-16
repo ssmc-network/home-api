@@ -15,6 +15,11 @@ ruff = "^0.15.1"
 mypy = "^2.0.0"
 pytest = "^9.1.1"
 pytest-cov = "^7.1.0"
+# fastapi.testclient (starlette.testclient) がhttpxを要求する。fastapiは
+# httpxを本体の依存に含めないため、テスト用として明示的に入れる必要がある。
+# なおstarlette 1.x以降はhttpx2を推奨する非推奨警告を出すようになるので、
+# Renovateがstarletteを上げてきた際にはhttpx2への切り替えを検討すること。
+httpx = "^0.28.1"
 # Redisのデータ構造(ハッシュ/リスト/blpop)そのものが検証対象になるモジュールが
 # あるため、mockではなく実際にコマンドを実行できるfakeredisを使っている。
 # testcontainersを採用しなかった理由はCLAUDE.md参照。
@@ -27,6 +32,13 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+# CIでは `pytest --cov --cov-report=term-missing` として実行し、その標準出力を
+# そのままPRコメントへ投稿している(詳細はCLAUDE.md)。計測対象をここに書いて
+# おくことで、CI側は `--cov` を値なしで渡すだけで済む。
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*"]
 
 [tool.mypy]
 show_error_context = true
