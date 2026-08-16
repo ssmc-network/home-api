@@ -67,10 +67,14 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 
 ## アーキテクチャ
 
-- **FastAPIアプリ**: `main.py` が `lifespan` で `RedisConnector().get_connection()` を `app.state.redis` に格納し、2つのrouterを `settings.prefix_url` 付きで登録する。`redoc_url=None`(ReDocは無効、Swagger UIのみ)。
+- **FastAPIアプリ**: `main.py` の `lifespan` がRedis接続を `app.state.redis` へ格納し、ダウンロードワーカーを起動し、2つのrouterを `settings.prefix_url` 付きで登録する。`redoc_url=None`(ReDocは無効、Swagger UIのみ)。
   - `routers/operation_check.py` — 疎通確認用。`/`(docsへリダイレクト)、`/operation`、`/operation/ip`、`/operation/gzip-test`。
-  - `routers/youtube_download_router.py` — 本体。`POST /download`、`GET /download/status`、`DELETE /download/all` と、yt-dlpを叩く処理(`process_queue`/`download_youtube`/`get_youtube_title`)。
-- **キュー処理はリクエスト駆動**: `POST /download` が `BackgroundTasks` で `process_queue` を起動し、Redisのリスト(`youtube_download_queue`)が空になるまで `lpop` し続ける。**常駐ワーカーではないため、POSTが来ないと積まれたジョブは処理されない**(下記「既知の負債」参照)。
+  - `routers/youtube_download_router.py` — HTTP層のみ。`POST /download`、`GET /download/status`、`DELETE /download/all` の3エンドポイントで、Redis操作は `modules/download_queue.py` 越しに行う。
+  - `modules/download_queue.py` — キュー(リスト)とステータス(ハッシュ)の読み書き、および常駐ワーカー(`run_worker`)。
+  - `modules/youtube_module.py` — yt-dlpの呼び出し(`download_youtube`/`get_youtube_title`)。
+- **キューの消化は常駐ワーカーが行う**: `lifespan` が `settings.download_workers` 本(既定1)のワーカータスクを起動し、各ワーカーが `blpop` でキューを待ち受ける。`POST /download` はキューへ積むだけで、ダウンロード自体には関与しない。**ワーカーの本数がそのまま同時ダウンロード数の上限**になる。Redisの `blpop` もyt-dlpのダウンロードもブロッキングなので、どちらも `asyncio.to_thread` でスレッドへ逃がしイベントループを止めない。**移行前は `POST /download` が `BackgroundTasks` で `process_queue` を起動する方式だったため、POSTが来ないと積まれたジョブが処理されず、逆に同時POSTの分だけ無制限に並列ダウンロードが走っていた**。
+- **ワーカーの停止**: `lifespan` の終了時に停止フラグ(`asyncio.Event`)を立て、処理中のダウンロードが終わるのを `settings.worker_shutdown_timeout_seconds` まで待ってから、待ち切れなかったワーカーだけキャンセルする。ワーカーが `blpop` で待機している場合は最大 `settings.queue_pop_timeout_seconds` 秒で停止に反応する。最後に `RedisConnector.close()` でプールを切断する。
+- **ワーカーは1件の失敗では止まらない**: ジョブ処理中の例外はステータスを `error` にした上で握り潰し、Redisの接続エラーは `settings.queue_error_backoff_seconds` 待ってから再試行する。**常駐ワーカーがループを抜けると以降のジョブが一切消化されなくなる**ため、意図的に広く捕捉している(移行前の `process_queue` はRedisエラーで `break` していたが、リクエスト毎に起動し直されるため問題にならなかった)。
 - **マルチステージDockerfile**: `ffmpeg` / `base`(`dhi.io/python:3-debian-dev`) → `dependencies` → `dev-dependencies` → `dev` / `prd`。OpenShift向けのUBIベースイメージではなく、通常のKubernetes環境向けにDocker Hardened Images (DHI) を使用している。ビルド系のステージ(`base`/`dependencies`/`dev-dependencies`/`dev`)は開発ツール入りの `-debian-dev` バリアントを使うが、`prd` だけは `base` を継承せず最小構成の `dhi.io/python:3` から独立して作っている(実行時イメージに開発ツールを含めないため)。ステージ名は兄弟リポジトリに合わせて `dev`/`prd` に統一している(以前は `develop`/`production`)。
 - **ffmpegは静的ビルドのバイナリを `mwader/static-ffmpeg` からCOPYする**: yt-dlpが映像と音声を別々に取得してmp4へマージするためにffmpegが必須だが、本番用の `dhi.io/python:3` は最小構成でパッケージマネージャを持たないため `apt-get install ffmpeg` ができない。このイメージが提供する `/ffmpeg`・`/ffprobe` は外部依存を持たない静的PIEバイナリなので、共有ライブラリを持ち込むことなくバイナリ2個のCOPYだけで済む。`dev`/`prd` の両ステージへ入れている。**このイメージは `docker.io` 由来のため、ワークフローのログイン順序に制約が生まれている**(前述の「`docker.io` へのログインは必ずビルドより後」を参照)。
 - **Poetryの依存関係はプロジェクト内 `.venv` に分離**(`POETRY_VIRTUALENVS_CREATE=true` + `POETRY_VIRTUALENVS_IN_PROJECT=true`)。`dependencies` ステージで `poetry config virtualenvs.options.no-pip true` を設定し、`.venv` に `pip` 自体を含めない(本番イメージにpip由来の脆弱性が紛れ込むのを防ぐため)。`dev`/`prd` はいずれも `dependencies`/`dev-dependencies` ステージから `.venv` の中身だけを `COPY --from` で引き継ぎ、poetry自身やビルド専用の依存(setuptoolsなど)は最終イメージに含めない。`dev` は `dev-dependencies`(devグループ込み)から、`prd` は `dependencies`(本番依存のみ)から `.venv` をコピーする。**移行前は `poetry config virtualenvs.create false` でシステムのsite-packagesへ直接インストールし、poetry本体を `goegoe0212/poetry-image:latest` という個人アカウントの浮動タグから持ち込んでいた**が、DHI移行に伴いどちらも解消した。
@@ -88,10 +92,5 @@ YouTubeの動画をダウンロードするためのFastAPI製REST API(`app/main
 1. **テストファイルが1件も無い** — pytest/pytest-cov と `[tool.pytest.ini_options]` は導入済みなので、あとは `app/tests/` 配下にユニットテストを置くだけ。`test.yaml` の `[ -d tests ]` ガードにより、`tests/` が出来た時点で自動的にCIで走り始める。兄弟リポジトリの `app/tests/`(`test_main.py`/`test_redis_module.py`/`test_log_modules.py`)が参考になる。
 2. **uvicorn側のログ設定が無い** — アプリケーションログ(`core/log_modules.py`)はJSON化したが、uvicornが出すアクセスログ・起動ログは素のままなので、1つのコンテナから2種類のフォーマットのログが出ている状態。`log_config.yaml` を用意してアクセスログもJSON化し、ヘルスチェックの除外フィルタを入れるとよい。**これはASGIサーバーを持たない兄弟リポジトリには存在しない、このリポジトリ固有の作業**(兄弟の `core/log_modules.py` にも対応物が無い)。
 3. **mypyをCIで実行していない** — `[tool.mypy]` の設定自体は入っており `mypy .` はクリーンに通るが、`test.yaml` にステップが無いためローカルでしか実行されない。これは兄弟リポジトリと同じ状態(揃ってはいる)だが、CIで実行しないと徐々に壊れていくため、両リポジトリ揃ってステップを足すのが望ましい。
-4. **アプリ設計上の課題**:
-   - キューの消化が `BackgroundTasks` によるリクエスト駆動で、POSTが来ないと処理されない。逆に同時POSTの分だけ並列にダウンロードが走り、同時実行数の制御が無い。
-   - バックグラウンド処理へ `Request` オブジェクトをそのまま渡し、レスポンス送出後に `request.app.state.redis` を参照している。
-   - `video_title if "video_title" in locals() else "unknown"` という `locals()` を使った実装。
-   - `RedisConnector._initialize_pool` が `redis.ConnectionError` を捕まえて `HTTPException` を投げているが、**ConnectionPoolの生成はソケット接続を伴わない**(実際の接続は最初のコマンド発行時)ため、この例外処理は実質デッドコード。兄弟リポジトリでは既に同じ問題を認識して削除・コメント化済み。
-   - `lifespan` に終了処理(Redis接続のクローズ)が無い。
-   - `DELETE /download/all` はステータスハッシュしか消さないため、キュー(`youtube_download_queue`)に未処理ジョブが残っていると、その後のPOSTを契機に「ステータスの無いジョブ」が処理されうる。
+4. **複数レプリカ運用時の同時ダウンロード数** — 同時実行数はワーカー本数で制御しているが、これは**1プロセス内での上限**でしかない。レプリカを増やすとその数だけ並列度も倍加する(`blpop` によりジョブ自体の重複処理は起きない)。全体で上限を設けたい場合はRedis側にセマフォを持たせるなどの仕組みが要る。
+5. **ダウンロード中にプロセスが落ちるとタスクが `processing` のまま残る** — `blpop` でキューから取り出した後にプロセスが停止すると、そのジョブはキューにもワーカーにも存在しないまま、ステータスだけ `processing` で残留する。厳密にやるなら処理中ジョブを別のリストへ退避する信頼性キュー(`lmove` を使うパターン)が必要。現状は `DELETE /download/all` で手動リセットする運用。
